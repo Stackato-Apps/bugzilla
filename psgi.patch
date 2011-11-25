@@ -1,0 +1,799 @@
+diff -ruN bugzilla-4.0.2/.backup~/app.psgi~ bugzilla-patched/.backup~/app.psgi~
+--- bugzilla-4.0.2/.backup~/app.psgi~	1969-12-31 16:00:00.000000000 -0800
++++ bugzilla-patched/.backup~/app.psgi~	2011-11-21 11:48:46.000000000 -0800
+@@ -0,0 +1,87 @@
++#!/usr/bin/env plackup
++# -*- Mode: perl; indent-tabs-mode: nil -*-
++# vim: set filetype=perl expandtab tabstop=4 shiftwidth=4:
++#
++# The contents of this file are subject to the Mozilla Public
++# License Version 1.1 (the "License"); you may not use this file
++# except in compliance with the License. You may obtain a copy of
++# the License at http://www.mozilla.org/MPL/
++#
++# Software distributed under the License is distributed on an "AS
++# IS" basis, WITHOUT WARRANTY OF ANY KIND, either express or
++# implied. See the License for the specific language governing
++# rights and limitations under the License.
++#
++# The Original Code is the Bugzilla Bug Tracking System.
++#
++# The Initial Developer of the Original Code is Hans Dieter Pearcey. 
++# Portions created by the Initial Developer are Copyright (C) 2010 the
++# Initial Developer. All Rights Reserved.
++#
++# Contributor(s):
++#   Hans Dieter Pearcey <hdp@cpan.org>
++#   Max Kanat-Alexander <mkanat@bugzilla.org>
++
++use strict;
++use warnings;
++use File::Basename;
++use lib dirname(__FILE__);
++use Bugzilla::Constants ();
++use lib Bugzilla::Constants::bz_locations()->{'ext_libpath'};
++
++# This is an array of regular expressions describing paths that
++# can be served statically by plackup if it is asked to do so.
++use constant ALLOWED_STATIC => qw(
++    docs
++    extensions/[^/]+/web
++    graphs
++    images
++    js
++    skins
++);
++
++# All Plack modules must be loaded before any Bugzilla modules,
++# in case they want to override built-in Perl functions.
++# For example, WrapCGI loads CGI::Compile, which overrides
++# "exit", and Bugzilla won't work properly unless exit has
++# already been overridden.
++#
++# Bugzilla::Constants doesn't call "exit", so it can safely
++# be loaded above.
++use Plack;
++use Plack::Builder;
++use Plack::App::WrapCGI;
++use Plack::App::URLMap;
++
++use Bugzilla::Install::Requirements qw(compilable_cgis);
++
++BEGIN { $ENV{PLACK_VERSION} = 'Plack/' . Plack->VERSION; }
++
++builder {
++    my $cgi_path = Bugzilla::Constants::bz_locations->{'cgi_path'};
++
++    my $static_paths = join('|', ALLOWED_STATIC);
++    enable 'Static',
++        path => qr{.*/($static_paths)/},
++        root => $cgi_path;
++
++    my $map = Plack::App::URLMap->new;
++    no warnings 'redefine';
++    local *lib::import = sub {};
++    use warnings;
++    foreach my $cgi (compilable_cgis()) {
++        my $base_name = basename($cgi);
++        my $app = Plack::App::WrapCGI->new(script => $cgi)->to_app;
++        my $wrapped = sub {
++            # These CGI variables aren't correct sometimes, unless
++            # we fix them here.
++            Bugzilla::init_page();
++            my $res = $app->(@_);
++            Bugzilla::_cleanup();
++            return $res;
++        };
++        $map->mount('/' => $wrapped) if $base_name eq 'index.cgi';
++        $map->mount("/$base_name" => $wrapped);
++    }
++    $map->to_app;
++};
+diff -ruN bugzilla-4.0.2/.htaccess bugzilla-patched/.htaccess
+--- bugzilla-4.0.2/.htaccess	2011-08-04 19:25:35.000000000 -0700
++++ bugzilla-patched/.htaccess	2011-11-21 11:48:46.000000000 -0800
+@@ -1,7 +1,10 @@
+ # Don't allow people to retrieve non-cgi executable files or our private data
+-<FilesMatch ^(.*\.pm|.*\.pl|.*localconfig.*)$>
++<FilesMatch ^(.*\.pm|.*\.pl|.*\.psgi|.*localconfig.*)$>
+   deny from all
+ </FilesMatch>
++<Files 'fastcgi.pl'>
++  allow from all
++</Files>
+ <IfModule mod_expires.c>
+ <IfModule mod_headers.c>
+ <IfModule mod_env.c>
+diff -ruN bugzilla-4.0.2/Bugzilla/Config.pm bugzilla-patched/Bugzilla/Config.pm
+--- bugzilla-4.0.2/Bugzilla/Config.pm	2011-08-04 19:25:35.000000000 -0700
++++ bugzilla-patched/Bugzilla/Config.pm	2011-11-21 11:48:46.000000000 -0800
+@@ -36,6 +36,7 @@
+ use Bugzilla::Constants;
+ use Bugzilla::Hook;
+ use Bugzilla::Install::Filesystem qw(fix_file_permissions);
++use Bugzilla::Install::Util qw(i_am_cgi i_am_persistent);
+ use Data::Dumper;
+ use File::Temp;
+ 
+@@ -326,14 +327,17 @@
+         # Now read the param back out from the sandbox
+         %params = %{$s->varglob('param')};
+     }
+-    elsif ($ENV{'SERVER_SOFTWARE'}) {
+-       # We're in a CGI, but the params file doesn't exist. We can't
++    elsif (i_am_cgi()) {
++       # We're in a CGI, but the params file doesn't exist. We can't use
+        # Template Toolkit, or even install_string, since checksetup
+-       # might not have thrown an error. Bugzilla::CGI->new
++       # might not have set those up yet. Bugzilla::CGI->new
+        # hasn't even been called yet, so we manually use CGI::Carp here
+-       # so that the user sees the error.
+-       require CGI::Carp;
+-       CGI::Carp->import('fatalsToBrowser');
++       # so that the user sees the error, except under mod_perl and Plack,
++       # which don't support CGI::Carp.
++       if (!i_am_persistent()) {
++           require CGI::Carp;
++           CGI::Carp->import('fatalsToBrowser');
++       }
+        die "The $datadir/params file does not exist."
+            . ' You probably need to run checksetup.pl.',
+     }
+diff -ruN bugzilla-4.0.2/Bugzilla/Error.pm bugzilla-patched/Bugzilla/Error.pm
+--- bugzilla-4.0.2/Bugzilla/Error.pm	2011-08-04 19:25:35.000000000 -0700
++++ bugzilla-patched/Bugzilla/Error.pm	2011-11-21 11:48:46.000000000 -0800
+@@ -37,14 +37,17 @@
+ use Date::Format;
+ 
+ # We cannot use $^S to detect if we are in an eval(), because mod_perl
+-# already eval'uates everything, so $^S = 1 in all cases under mod_perl!
++# and Plack already eval'uate everything, so $^S = 1 always under those!
+ sub _in_eval {
+-    my $in_eval = 0;
+     for (my $stack = 1; my $sub = (caller($stack))[3]; $stack++) {
+-        last if $sub =~ /^ModPerl/;
+-        $in_eval = 1 if $sub =~ /^\(eval\)/;
++        last if $sub =~ /^(?:ModPerl|Plack|CGI::Compile)/;
++        return 1 if $sub =~ /^\(eval\)/
++                    # If the very next stack item is CGI::Compile, then
++                    # we're not in a real eval, we're in CGI::Compile's
++                    # top-level eval while running under Plack.
++                    && (caller($stack + 1))[3] !~ /^CGI::Compile/;
+     }
+-    return $in_eval;
++    return 0;
+ }
+ 
+ sub _throw_error {
+diff -ruN bugzilla-4.0.2/Bugzilla/Install/Filesystem.pm bugzilla-patched/Bugzilla/Install/Filesystem.pm
+--- bugzilla-4.0.2/Bugzilla/Install/Filesystem.pm	2011-08-04 19:25:35.000000000 -0700
++++ bugzilla-patched/Bugzilla/Install/Filesystem.pm	2011-11-21 11:48:46.000000000 -0800
+@@ -153,6 +153,8 @@
+         'whine.pl'        => { perms => WS_EXECUTE },
+         'email_in.pl'     => { perms => WS_EXECUTE },
+         'sanitycheck.pl'  => { perms => WS_EXECUTE },
++        'fastcgi.pl'      => { perms => WS_EXECUTE },
++        'app.psgi'        => { perms => OWNER_EXECUTE | WS_SERVE },
+         'checksetup.pl'   => { perms => OWNER_EXECUTE },
+         'runtests.pl'     => { perms => OWNER_EXECUTE },
+         'jobqueue.pl'     => { perms => OWNER_EXECUTE },
+diff -ruN bugzilla-4.0.2/Bugzilla/Install/Requirements.pm bugzilla-patched/Bugzilla/Install/Requirements.pm
+--- bugzilla-4.0.2/Bugzilla/Install/Requirements.pm	2011-08-04 19:25:35.000000000 -0700
++++ bugzilla-patched/Bugzilla/Install/Requirements.pm	2011-11-21 11:48:46.000000000 -0800
+@@ -42,7 +42,11 @@
+     check_graphviz
+     have_vers
+     install_command
+-    map_files_to_features
++);
++
++our @EXPORT_OK = qw(
++    compilable_cgis
++    feature_available
+ );
+ 
+ # This is how many *'s are in the top of each "box" message printed
+@@ -312,6 +316,13 @@
+         feature => ['jobqueue'],
+     },
+ 
++    {
++        package => 'Plack',
++        module  => 'Plack',
++        version => 0,
++        feature => ['fastcgi'],
++    },
++
+     # mod_perl
+     {
+         package => 'mod_perl',
+@@ -354,6 +365,7 @@
+ # This maps features to the files that require that feature in order
+ # to compile. It is used by t/001compile.t and mod_perl.pl.
+ use constant FEATURE_FILES => (
++    fastcgi       => ['app.psgi'],
+     jsonrpc       => ['Bugzilla/WebService/Server/JSONRPC.pm', 'jsonrpc.cgi'],
+     xmlrpc        => ['Bugzilla/WebService/Server/XMLRPC.pm', 'xmlrpc.cgi',
+                       'Bugzilla/WebService.pm', 'Bugzilla/WebService/*.pm'],
+@@ -739,7 +751,69 @@
+     return sprintf $command, $package;
+ }
+ 
+-# This does a reverse mapping for FEATURE_FILES.
++######################################
++# Functions Related to FEATURE_FILES #
++######################################
++
++# Used by mod_perl and FastCGI to know which CGI scripts
++# can be compiled, based on which features are available.
++sub compilable_cgis {
++    my $cgi_path = bz_locations()->{'cgi_path'};
++    my $feature_files = map_files_to_features();
++
++    my @compilable;
++    foreach my $file (glob "$cgi_path/*.cgi") {
++        my $base_filename = File::Basename::basename($file);
++        if (my $feature = $feature_files->{$base_filename}) {
++            next if !feature_available($feature);
++        }
++        push(@compilable, $file);
++    }
++
++    return @compilable;
++}
++
++sub _feature_requirements {
++    my %feature_map;
++    my $optional_modules = OPTIONAL_MODULES;
++    foreach my $package (@$optional_modules) {
++        foreach my $feature (@{ $package->{feature} }) {
++            $feature_map{$feature} ||= [];
++            push(@{ $feature_map{$feature} }, $package->{module});
++        }
++    }
++    return \%feature_map;
++}
++
++sub feature_available {
++    my ($feature) = @_;
++
++    my $cache = Bugzilla::Install::Util::_cache();
++    return $cache->{feature}->{$feature}
++        if exists $cache->{feature}->{$feature};
++
++    $cache->{feature_map} ||= _feature_requirements();
++    my $feature_map = $cache->{feature_map};
++
++    if (!$feature_map->{$feature}) {
++        die install_string('invalid_feature', { feature => $feature });
++    }
++
++    my $success = 1;
++    foreach my $module (@{ $feature_map->{$feature} }) {
++        # We can't use a string eval and "use" here (it kills Template-Toolkit,
++        # see https://rt.cpan.org/Public/Bug/Display.html?id=47929), so we have
++        # to do a block eval.
++        $module =~ s{::}{/}g;
++        $module .= ".pm";
++        eval { require $module; 1; } or $success = 0;
++    }
++    $cache->{feature}->{$feature} = $success;
++    return $success;
++}
++
++# This says which files are associated with which features.
++# Basically, it returns a reverse mapping of FEATURE_FILES.
+ sub map_files_to_features {
+     my %features = FEATURE_FILES;
+     my %files;
+diff -ruN bugzilla-4.0.2/Bugzilla/Install/Util.pm bugzilla-patched/Bugzilla/Install/Util.pm
+--- bugzilla-4.0.2/Bugzilla/Install/Util.pm	2011-08-04 19:25:35.000000000 -0700
++++ bugzilla-patched/Bugzilla/Install/Util.pm	2011-11-21 11:53:44.000000000 -0800
+@@ -46,12 +46,16 @@
+     extension_package_directory
+     extension_requirement_packages
+     extension_template_directory
++    i_am_cgi
++    i_am_persistent
+     indicate_progress
+     install_string
+     include_languages
+     template_include_path
+     vers_cmp
+     init_console
++    trick_taint
++    trim
+ );
+ 
+ sub bin_loc {
+@@ -301,8 +305,7 @@
+ sub _wanted_languages {
+     my ($requested, @wanted);
+ 
+-    # Checking SERVER_SOFTWARE is the same as i_am_cgi() in Bugzilla::Util.
+-    if (exists $ENV{'SERVER_SOFTWARE'}) {
++    if (i_am_cgi()) {
+         my $cgi = Bugzilla->cgi;
+         $requested = $cgi->http('Accept-Language') || '';
+         my $lang = $cgi->cookie('LANG');
+@@ -672,9 +675,28 @@
+     return $_cache;
+ }
+ 
+-###############################
+-# Copied from Bugzilla::Util #
+-##############################
++#############################################
++# Documented and Exported in Bugzilla::Util #
++#############################################
++
++# These are functions that are used everywhere in Bugzilla, but are 
++# needed during times when we can't load Bugzilla::Util. Bugzilla::Util
++# imports them from here and then re-exports them, so you can get them
++# from here or from there.
++
++sub i_am_cgi {
++    # I use SERVER_SOFTWARE because it's required to be defined for all
++    # requests in the CGI spec.
++    #
++    # Also, under mod_perl and FastCGI, when we are compiling the CGIs,
++    # SERVER_SOFTWARE many not be defined, but we still need to act like
++    # we are in a webserver environment.
++    return (exists $ENV{'SERVER_SOFTWARE'} or i_am_persistent()) ? 1 : 0;
++}
++
++sub i_am_persistent {
++    return $ENV{MOD_PERL} || $ENV{PLACK_VERSION};
++}
+ 
+ sub trick_taint {
+     require Carp;
+diff -ruN bugzilla-4.0.2/Bugzilla/Template.pm bugzilla-patched/Bugzilla/Template.pm
+--- bugzilla-4.0.2/Bugzilla/Template.pm	2011-08-04 19:25:35.000000000 -0700
++++ bugzilla-patched/Bugzilla/Template.pm	2011-11-21 11:48:46.000000000 -0800
+@@ -587,13 +587,13 @@
+         PRE_CHOMP => 1,
+         TRIM => 1,
+ 
+-        # Bugzilla::Template::Plugin::Hook uses the absolute (in mod_perl)
+-        # or relative (in mod_cgi) paths of hook files to explicitly compile
+-        # a specific file. Also, these paths may be absolute at any time
+-        # if a packager has modified bz_locations() to contain absolute
+-        # paths.
++        # Bugzilla::Template::Plugin::Hook uses the absolute 
++        # (in mod_perl/FastCGI) or relative (in mod_cgi) paths of hook files to
++        # explicitly compile a specific file. Also, these paths may be absolute
++        # at any time if a packager has modified bz_locations() to contain
++        # absolute paths.
+         ABSOLUTE => 1,
+-        RELATIVE => $ENV{MOD_PERL} ? 0 : 1,
++        RELATIVE => i_am_persistent() ? 0 : 1,
+ 
+         COMPILE_DIR => bz_locations()->{'datadir'} . "/template",
+ 
+diff -ruN bugzilla-4.0.2/Bugzilla/Util.pm bugzilla-patched/Bugzilla/Util.pm
+--- bugzilla-4.0.2/Bugzilla/Util.pm	2011-08-04 19:25:35.000000000 -0700
++++ bugzilla-patched/Bugzilla/Util.pm	2011-11-21 11:48:46.000000000 -0800
+@@ -35,7 +35,7 @@
+                              detaint_signed
+                              html_quote url_quote xml_quote
+                              css_class_quote html_light_quote url_decode
+-                             i_am_cgi correct_urlbase remote_ip
++                             i_am_cgi i_am_persistent correct_urlbase remote_ip
+                              do_ssl_redirect_if_required use_attachbase
+                              diff_arrays on_main_db
+                              trim wrap_hard wrap_comment find_wrap_point
+@@ -47,6 +47,11 @@
+                              get_text template_var disable_utf8);
+ 
+ use Bugzilla::Constants;
++# We import these so that we can re-export them again, because historically
++# many modules imported these from Bugzilla::Util. However, they are
++# in Bugzilla::Install::Util because they are needed during times when
++# we can't load Bugzilla::Util.
++use Bugzilla::Install::Util qw(i_am_cgi i_am_persistent trick_taint trim);
+ 
+ use Date::Parse;
+ use Date::Format;
+@@ -59,14 +64,6 @@
+ use Template::Filters;
+ use Text::Wrap;
+ 
+-sub trick_taint {
+-    require Carp;
+-    Carp::confess("Undef to trick_taint") unless defined $_[0];
+-    my $match = $_[0] =~ /^(.*)$/s;
+-    $_[0] = $match ? $1 : undef;
+-    return (defined($_[0]));
+-}
+-
+ sub detaint_natural {
+     my $match = $_[0] =~ /^(\d+)$/;
+     $_[0] = $match ? int($1) : undef;
+@@ -248,12 +245,6 @@
+     return $todecode;
+ }
+ 
+-sub i_am_cgi {
+-    # I use SERVER_SOFTWARE because it's required to be
+-    # defined for all requests in the CGI spec.
+-    return exists $ENV{'SERVER_SOFTWARE'} ? 1 : 0;
+-}
+-
+ # This exists as a separate function from Bugzilla::CGI::redirect_to_https
+ # because we don't want to create a CGI object during XML-RPC calls
+ # (doing so can mess up XML-RPC).
+@@ -326,15 +317,6 @@
+     return (\@removed, \@added);
+ }
+ 
+-sub trim {
+-    my ($str) = @_;
+-    if ($str) {
+-      $str =~ s/^\s+//g;
+-      $str =~ s/\s+$//g;
+-    }
+-    return $str;
+-}
+-
+ sub wrap_comment {
+     my ($comment, $cols) = @_;
+     my $wrappedcomment = "";
+@@ -731,6 +713,7 @@
+   # Functions that tell you about your environment
+   my $is_cgi   = i_am_cgi();
+   my $urlbase  = correct_urlbase();
++  my $is_mod_perl_or_fastcgi = i_am_persistent();
+ 
+   # Data manipulation
+   ($removed, $added) = diff_arrays(\@old, \@new);
+@@ -863,6 +846,10 @@
+ server. For example, it would return false if the caller is running
+ in a command-line script.
+ 
++=item C<i_am_persistent>
++
++Returns a true value if you are running under mod_perl or FastCGI.
++
+ =item C<correct_urlbase()>
+ 
+ Returns either the C<sslbase> or C<urlbase> parameter, depending on the
+diff -ruN bugzilla-4.0.2/Bugzilla.pm bugzilla-patched/Bugzilla.pm
+--- bugzilla-4.0.2/Bugzilla.pm	2011-08-04 19:25:35.000000000 -0700
++++ bugzilla-patched/Bugzilla.pm	2011-11-21 11:48:46.000000000 -0800
+@@ -26,10 +26,16 @@
+ 
+ use strict;
+ 
+-# We want any compile errors to get to the browser, if possible.
+ BEGIN {
+-    # This makes sure we're in a CGI.
+-    if ($ENV{SERVER_SOFTWARE} && !$ENV{MOD_PERL}) {
++    # We want any compile errors to get to the browser, if possible.
++    # This only affects mod_cgi, though--it doesn't work under mod_perl,
++    # and under Plack we have different ways of accomplishing this.
++    #
++    # Checking these ENV variables is like calling
++    # i_am_cgi() && !i_am_persistent(), but we can't use those here yet,
++    # because we want to even catch errors in compiling
++    # Bugzilla::Install::Util.
++    if ($ENV{SERVER_SOFTWARE} && !$ENV{MOD_PERL} && !$ENV{PLACK_VERSION}) {
+         require CGI::Carp;
+         CGI::Carp->import('fatalsToBrowser');
+     }
+@@ -43,7 +49,7 @@
+ use Bugzilla::Extension;
+ use Bugzilla::DB;
+ use Bugzilla::Install::Localconfig qw(read_localconfig);
+-use Bugzilla::Install::Requirements qw(OPTIONAL_MODULES);
++use Bugzilla::Install::Requirements qw(feature_available);
+ use Bugzilla::Install::Util qw(init_console);
+ use Bugzilla::Template;
+ use Bugzilla::User;
+@@ -199,6 +205,8 @@
+     return $class->request_cache->{"template_inner_$lang"};
+ }
+ 
++# Also see the bottom of this file, where extension packages are
++# pre-loaded in persistent environments.
+ our $extension_packages;
+ sub extensions {
+     my ($class) = @_;
+@@ -222,36 +230,7 @@
+ 
+ sub feature {
+     my ($class, $feature) = @_;
+-    my $cache = $class->request_cache;
+-    return $cache->{feature}->{$feature}
+-        if exists $cache->{feature}->{$feature};
+-
+-    my $feature_map = $cache->{feature_map};
+-    if (!$feature_map) {
+-        foreach my $package (@{ OPTIONAL_MODULES() }) {
+-            foreach my $f (@{ $package->{feature} }) {
+-                $feature_map->{$f} ||= [];
+-                push(@{ $feature_map->{$f} }, $package->{module});
+-            }
+-        }
+-        $cache->{feature_map} = $feature_map;
+-    }
+-
+-    if (!$feature_map->{$feature}) {
+-        ThrowCodeError('invalid_feature', { feature => $feature });
+-    }
+-
+-    my $success = 1;
+-    foreach my $module (@{ $feature_map->{$feature} }) {
+-        # We can't use a string eval and "use" here (it kills Template-Toolkit,
+-        # see https://rt.cpan.org/Public/Bug/Display.html?id=47929), so we have
+-        # to do a block eval.
+-        $module =~ s{::}{/}g;
+-        $module .= ".pm";
+-        eval { require $module; 1; } or $success = 0;
+-    }
+-    $cache->{feature}->{$feature} = $success;
+-    return $success;
++    return feature_available($feature);
+ }
+ 
+ sub cgi {
+@@ -606,15 +585,27 @@
+         $dbh->bz_rollback_transaction() if $dbh->bz_in_transaction;
+         $dbh->disconnect;
+     }
+-    undef $_request_cache;
++    # We set this to an empty hashref instead of undefining it because
++    # this allows FastCGI to use it again for the next request.
++    $Bugzilla::Install::Util::_cache = {};
++    $_request_cache = $Bugzilla::Install::Util::_cache;
+ }
+ 
+ sub END {
+-    # Bugzilla.pm cannot compile in mod_perl.pl if this runs.
+-    _cleanup() unless $ENV{MOD_PERL};
++    # FastCGI and mod_perl both run this themselves.
++    _cleanup() unless i_am_persistent();
+ }
+ 
+-init_page() if !$ENV{MOD_PERL};
++if (i_am_persistent()) {
++    # If we are running under mod_perl or FastCGI, preload all the
++    # Extension packages. This has to be done down here so that
++    # $_request_cache is initialized (and any other default values
++    # are set up).
++    $extension_packages = Bugzilla::Extension->load_all() if i_am_persistent();
++}
++else {
++    init_page();
++}
+ 
+ 1;
+ 
+diff -ruN bugzilla-4.0.2/app.psgi bugzilla-patched/app.psgi
+--- bugzilla-4.0.2/app.psgi	1969-12-31 16:00:00.000000000 -0800
++++ bugzilla-patched/app.psgi	2011-11-21 12:42:43.000000000 -0800
+@@ -0,0 +1,89 @@
++#!/usr/bin/env plackup
++# -*- Mode: perl; indent-tabs-mode: nil -*-
++# vim: set filetype=perl expandtab tabstop=4 shiftwidth=4:
++#
++# The contents of this file are subject to the Mozilla Public
++# License Version 1.1 (the "License"); you may not use this file
++# except in compliance with the License. You may obtain a copy of
++# the License at http://www.mozilla.org/MPL/
++#
++# Software distributed under the License is distributed on an "AS
++# IS" basis, WITHOUT WARRANTY OF ANY KIND, either express or
++# implied. See the License for the specific language governing
++# rights and limitations under the License.
++#
++# The Original Code is the Bugzilla Bug Tracking System.
++#
++# The Initial Developer of the Original Code is Hans Dieter Pearcey. 
++# Portions created by the Initial Developer are Copyright (C) 2010 the
++# Initial Developer. All Rights Reserved.
++#
++# Contributor(s):
++#   Hans Dieter Pearcey <hdp@cpan.org>
++#   Max Kanat-Alexander <mkanat@bugzilla.org>
++
++use strict;
++use warnings;
++use File::Basename;
++use lib dirname(__FILE__);
++use Bugzilla::Constants ();
++use lib Bugzilla::Constants::bz_locations()->{'ext_libpath'};
++
++# This is an array of regular expressions describing paths that
++# can be served statically by plackup if it is asked to do so.
++use constant ALLOWED_STATIC => qw(
++    docs
++    extensions/[^/]+/web
++    graphs
++    images
++    js
++    skins
++);
++
++# All Plack modules must be loaded before any Bugzilla modules,
++# in case they want to override built-in Perl functions.
++# For example, WrapCGI loads CGI::Compile, which overrides
++# "exit", and Bugzilla won't work properly unless exit has
++# already been overridden.
++#
++# Bugzilla::Constants doesn't call "exit", so it can safely
++# be loaded above.
++use Plack;
++use Plack::Builder;
++use Plack::App::WrapCGI;
++use Plack::App::URLMap;
++
++use Bugzilla::Install::Requirements qw(compilable_cgis);
++
++BEGIN { $ENV{PLACK_VERSION} = 'Plack/' . Plack->VERSION; }
++
++builder {
++    enable 'Plack::Middleware::ContentLength';
++
++    my $cgi_path = Bugzilla::Constants::bz_locations->{'cgi_path'};
++
++    my $static_paths = join('|', ALLOWED_STATIC);
++    enable 'Static',
++        path => qr{.*/($static_paths)/},
++        root => $cgi_path;
++
++    my $map = Plack::App::URLMap->new;
++    no warnings 'redefine';
++    local *lib::import = sub {};
++    use warnings;
++    foreach my $cgi (compilable_cgis()) {
++        my $base_name = basename($cgi);
++        my $app = Plack::App::WrapCGI->new(script => $cgi)->to_app;
++        my $wrapped = sub {
++            # These CGI variables aren't correct sometimes, unless
++            # we fix them here.
++            Bugzilla::init_page();
++            my $res = $app->(@_);
++            Bugzilla::_cleanup();
++            return $res;
++        };
++        $map->mount('/' => $wrapped) if $base_name eq 'index.cgi';
++        $map->mount("/$base_name" => $wrapped);
++    }
++    $map->to_app;
++};
+diff -ruN bugzilla-4.0.2/checksetup.pl bugzilla-patched/checksetup.pl
+--- bugzilla-4.0.2/checksetup.pl	2011-08-04 19:25:35.000000000 -0700
++++ bugzilla-patched/checksetup.pl	2011-11-21 12:00:23.000000000 -0800
+@@ -53,7 +53,7 @@
+ use lib qw(. lib);
+ use Bugzilla::Constants;
+ use Bugzilla::Install::Requirements;
+-use Bugzilla::Install::Util qw(install_string get_version_and_os init_console);
++use Bugzilla::Install::Util qw(install_string get_version_and_os init_console i_am_cgi);
+ 
+ ######################################################################
+ # Live Code
+diff -ruN bugzilla-4.0.2/fastcgi.pl bugzilla-patched/fastcgi.pl
+--- bugzilla-4.0.2/fastcgi.pl	1969-12-31 16:00:00.000000000 -0800
++++ bugzilla-patched/fastcgi.pl	2011-11-21 11:48:46.000000000 -0800
+@@ -0,0 +1,21 @@
++#!/usr/bin/perl
++use strict;
++use warnings;
++use File::Basename;
++use lib dirname(__FILE__);
++use Bugzilla::Constants;
++my $cgi_dir = bz_locations()->{'cgi_path'};
++
++my @args = @ARGV;
++if ($ENV{PLACK_ENV} and $ENV{PLACK_ENV} eq 'development') {
++    # XXX Plack daemonizes when you add this argument, which
++    # doesn't work under mod_fcgid
++    # push(@args, '-R', "$cgi_dir,$cgi_dir/Bugzilla,$lib_dir");
++}
++else {
++    push(@args, '--env=deployment');
++}
++
++my $psgi = "$cgi_dir/app.psgi";
++exec('plackup', '--server=FCGI', '--host=localhost', @args, $psgi)
++    or die "Couldn't exec $psgi: $!";
+diff -ruN bugzilla-4.0.2/install-module.pl bugzilla-patched/install-module.pl
+--- bugzilla-4.0.2/install-module.pl	2011-08-04 19:25:35.000000000 -0700
++++ bugzilla-patched/install-module.pl	2011-11-21 11:48:46.000000000 -0800
+@@ -99,6 +99,9 @@
+         # --all shouldn't include mod_perl2, because it can have some complex
+         # configuration, and really should be installed on its own.
+         next if $cpan_name eq 'mod_perl2';
++        # For working FastCGI support, we need the "plackup" binary
++        # installed somewhere in the system path.
++        next if $cpan_name eq 'Plack';
+         next if $cpan_name eq 'DBD::Oracle' and !$ENV{ORACLE_HOME};
+         next if $cpan_name eq 'DBD::Pg' and !bin_loc('pg_config');
+         install_module($cpan_name);
+diff -ruN bugzilla-4.0.2/mod_perl.pl bugzilla-patched/mod_perl.pl
+--- bugzilla-4.0.2/mod_perl.pl	2011-08-04 19:25:35.000000000 -0700
++++ bugzilla-patched/mod_perl.pl	2011-11-21 11:48:46.000000000 -0800
+@@ -88,15 +88,11 @@
+ 
+ $server->add_config([split("\n", $conf)]);
+ 
+-# Pre-load all extensions
+-$Bugzilla::extension_packages = Bugzilla::Extension->load_all();
+-
+ # Have ModPerl::RegistryLoader pre-compile all CGI scripts.
+ my $rl = new ModPerl::RegistryLoader();
+ # If we try to do this in "new" it fails because it looks for a 
+ # Bugzilla/ModPerl/ResponseHandler.pm
+ $rl->{package} = 'Bugzilla::ModPerl::ResponseHandler';
+-my $feature_files = Bugzilla::Install::Requirements::map_files_to_features();
+ 
+ # Prevent "use lib" from doing anything when the .cgi files are compiled.
+ # This is important to prevent the current directory from getting into
+@@ -105,11 +101,7 @@
+ local *lib::import = sub {};
+ use warnings;
+ 
+-foreach my $file (glob "$cgi_path/*.cgi") {
+-    my $base_filename = File::Basename::basename($file);
+-    if (my $feature = $feature_files->{$base_filename}) {
+-        next if !Bugzilla->feature($feature);
+-    }
++foreach my $file (compilable_cgis()) {
+     Bugzilla::Util::trick_taint($file);
+     $rl->handler($file, $file);
+ }
+diff -ruN bugzilla-4.0.2/template/en/default/global/code-error.html.tmpl bugzilla-patched/template/en/default/global/code-error.html.tmpl
+--- bugzilla-4.0.2/template/en/default/global/code-error.html.tmpl	2011-08-04 19:25:35.000000000 -0700
++++ bugzilla-patched/template/en/default/global/code-error.html.tmpl	2011-11-21 11:48:46.000000000 -0800
+@@ -223,12 +223,6 @@
+     [% title = "Invalid Dimensions" %]
+     The width or height specified is not a positive integer.
+ 
+-  [% ELSIF error == "invalid_feature" %]
+-    [% title = "Invalid Feature Name" %]
+-    [% feature FILTER html %] is not a valid feature name. See
+-    <code>OPTIONAL_MODULES</code> in 
+-    <code>Bugzilla::Install::Requirements</code> for valid names.
+-
+   [% ELSIF error == "invalid_flag_association" %]
+     [% title = "Invalid Flag Association" %]
+     Some flags do not belong to
+diff -ruN bugzilla-4.0.2/template/en/default/setup/strings.txt.pl bugzilla-patched/template/en/default/setup/strings.txt.pl
+--- bugzilla-4.0.2/template/en/default/setup/strings.txt.pl	2011-08-04 19:25:35.000000000 -0700
++++ bugzilla-patched/template/en/default/setup/strings.txt.pl	2011-11-21 12:00:01.000000000 -0800
+@@ -57,6 +57,7 @@
+ END
+     feature_auth_ldap         => 'LDAP Authentication',
+     feature_auth_radius       => 'RADIUS Authentication',
++    feature_fastcgi           => 'FastCGI Support',
+     feature_graphical_reports => 'Graphical Reports',
+     feature_html_desc         => 'More HTML in Product/Group Descriptions',
+     feature_inbound_email     => 'Inbound Email',
+@@ -94,6 +95,10 @@
+ EOT
+     install_module => 'Installing ##module## version ##version##...',
+     installation_failed => '*** Installation aborted. Read the messages above. ***',
++    invalid_feature => <<'END',
++'##feature##' is not a valid feature name. See OPTIONAL_MODULES in
++Bugzilla::Install::Requirements for valid names.
++END
+     max_allowed_packet => <<EOT,
+ WARNING: You need to set the max_allowed_packet parameter in your MySQL
+ configuration to at least ##needed##. Currently it is set to ##current##.
+diff -ruN bugzilla-4.0.2/testagent.cgi bugzilla-patched/testagent.cgi
+--- bugzilla-4.0.2/testagent.cgi	2011-08-04 19:25:35.000000000 -0700
++++ bugzilla-patched/testagent.cgi	2011-11-21 11:48:46.000000000 -0800
+@@ -19,6 +19,10 @@
+ 
+ use strict;
+ print "content-type:text/plain\n\n";
+-print "OK " . ($::ENV{MOD_PERL} || "mod_cgi") . "\n";
++print "OK";
++my @info = ($ENV{MOD_PERL}, $ENV{PLACK_VERSION});
++@info = grep { defined($_) } @info;
++my $info_string = join(' ', @info) || 'mod_cgi';
++print ' ', $info_string, "\n";
+ exit;
+ 
