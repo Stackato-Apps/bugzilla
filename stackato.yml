@@ -1,0 +1,30 @@
+name: bugzilla
+
+# Need to specify the framework explicitly because we don't have
+# an app.psgi file.  It is called bugzilla/psgi, and it will only
+# be created during post-staging.
+framework:
+  type: perl
+
+# CGI::Emulate::PSGI has a bug that prevents it to work with uWSGI:
+#   https://rt.cpan.org/Ticket/Display.html?id=72684
+# So we are going to run Bugzilla under plackup instead for now:
+processes:
+  web: (cd bugzilla && plackup --port $VCAP_APP_PORT)
+  # Once the bug is fixed the web command should be:
+  #  web: (cd bugzilla && $PROCESSES_WEB)
+
+hooks:
+  post-staging: perl setup.pl
+  # for debugging purposes only
+  pre-running: env
+
+services:
+  mysql: mysql-bugzilla
+
+mem: 128M
+
+# Prevent a local development copy of the bugzilla tarball or directory
+# from being synced to the cloud controller.
+ignores:
+  - bugzilla
