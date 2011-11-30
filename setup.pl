@@ -56,10 +56,10 @@ my %cred = %{$mysql->{credentials}};
 
 # Create an "answer" file for checksetup.pl to configure MySQL
 # and to setup the initial administrator account.
-my %answer = (
-    ADMIN_EMAIL    => 'admin@example.com',
-    ADMIN_PASSWORD => 'changeme',
-    ADMIN_REALNAME => 'Sample Admin',
+our %answer;
+do '../myconfig.pl';
+
+%answer = (
     NO_PAUSE       => 1,
     db_driver      => 'mysql',
     db_host        => $cred{host},
@@ -70,9 +70,11 @@ my %answer = (
     webservergroup => 'stackato',
 
     mail_delivery_method => 'SMTP',
-    mailfrom             => "bugzilla-daemon\@example.com",
-    smtpserver           => "smtp.example.com",
+    %answer
 );
+
+# Make sure urlbase ends with a slash
+$answer{urlbase} =~ s,(.*[^/])$,$1/,;
 
 my $answer = "checksetup.answer";
 open my $fh, ">", $answer or die "Can't write '$answer': $!";
