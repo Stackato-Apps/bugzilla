@@ -9,9 +9,7 @@ Email::Send
 Email::MIME
 Template::
 URI
-Plack::Builder
-Plack::App::WrapCGI
-Plack::App::URLMap
+Plack
 CGI::Emulate::PSGI
 CGI::Compile
 
