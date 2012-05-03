@@ -16,8 +16,6 @@ processes:
 
 hooks:
   post-staging: perl setup.pl
-  # for debugging purposes only
-  pre-running: env
 
 services:
   mysql: mysql-bugzilla
