@@ -18,7 +18,7 @@ hooks:
   post-staging: perl setup.pl
 
 services:
-  mysql: mysql-bugzilla
+  mysql-bugzilla: mysql
 
 mem: 128M
 
