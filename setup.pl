@@ -45,28 +45,22 @@ run("patch -p1 < ../psgi.patch");
 # Just to have the diagnostic output in the staging log
 run("$^X ./checksetup.pl --check-modules");
 
-# Locate credentials for the "mysql-bugzilla" service
-die "No services configured" unless defined $ENV{VCAP_SERVICES};
-my $services = decode_json($ENV{VCAP_SERVICES});
-die "No MySQL service configured" unless $services->{"mysql-5.1"};
-
-my($mysql) = grep $_->{name} eq "mysql-bugzilla", @{$services->{"mysql-5.1"}};
-my %cred = %{$mysql->{credentials}};
-
-
 # Create an "answer" file for checksetup.pl to configure MySQL
 # and to setup the initial administrator account.
 our %answer;
 do '../myconfig.pl';
 
+my($user,$password,$host,$port,$name) = $ENV{MYSQL_URL} =~ m{mysql://(.+?):(.+?)\@(.+?):(\d+?)/(.*?)$}
+    or die "MySQL service not configured";
+
 %answer = (
     NO_PAUSE       => 1,
     db_driver      => 'mysql',
-    db_host        => $cred{host},
-    db_name        => $cred{name},
-    db_pass        => $cred{password},
-    db_port        => $cred{port},
-    db_user        => $cred{user},
+    db_host        => $host,
+    db_name        => $name,
+    db_pass        => $password,
+    db_port        => $port,
+    db_user        => $user,
     webservergroup => 'stackato',
 
     mail_delivery_method => 'SMTP',
