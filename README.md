@@ -29,9 +29,12 @@ account credentials are:
 These, along with the email settings, should be changed as soon as
 possible in the web interface under Administration->Parameters.
 
-## Deploying Bugzilla
+## Deploying on Stackato
+
+    $ git clone git://github.com/Stackato-Apps/bugzilla.git
+    $ cd bugzilla
 
 Verify the settings in `stackato.yml` and `myconfig.pl` then run:
 
-  $ stackato push -n
+    $ stackato push -n
 
