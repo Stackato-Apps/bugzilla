@@ -15,20 +15,20 @@ processes:
 
 requirements:
   cpan:
-    - CGI
-    - Date::Format
-    - DateTime
-    - DateTime::TimeZone
-    - DBI
-    - DBD::mysql
-    - Digest::SHA
-    - Email::Send
-    - Email::MIME
-    - Template
-    - URI
-    - Plack
-    - CGI::Emulate::PSGI
-    - CGI::Compile
+  - CGI
+  - Date::Format
+  - DateTime
+  - DateTime::TimeZone
+  - DBI
+  - DBD::mysql
+  - Digest::SHA
+  - Email::Send
+  - Email::MIME
+  - Template
+  - URI
+  - Plack
+  - CGI::Emulate::PSGI
+  - CGI::Compile
 
 env:
   PERL_CPANM_OPT: --notest
@@ -47,4 +47,4 @@ mem: 128M
 # Prevent a local development copy of the bugzilla tarball or directory
 # from being synced to the cloud controller.
 ignores:
-  - bugzilla
+- bugzilla
