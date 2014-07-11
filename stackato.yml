@@ -13,23 +13,6 @@ processes:
   # Once the bug is fixed the web command should be:
   #  web: (cd bugzilla && $PROCESSES_WEB)
 
-requirements:
-  cpan:
-  - CGI
-  - Date::Format
-  - DateTime
-  - DateTime::TimeZone
-  - DBI
-  - DBD::mysql
-  - Digest::SHA
-  - Email::Send
-  - Email::MIME
-  - Template
-  - URI
-  - Plack
-  - CGI::Emulate::PSGI
-  - CGI::Compile
-
 env:
   PERL_CPANM_OPT: --notest
 
