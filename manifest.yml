@@ -7,7 +7,8 @@ applications:
       type: mysql
   stackato:
     env:
-      PERL_CPANM_OPT: --notest
+      PERL_CPANM_OPT:
+        default: --notest
     hooks:
       post-staging: perl setup.pl
     # Prevent a local development copy of the bugzilla tarball or directory
