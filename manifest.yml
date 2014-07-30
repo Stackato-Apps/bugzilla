@@ -1,0 +1,18 @@
+applications:
+- name: bugzilla
+  buildpack: https://github.com/ActiveState/stackato-buildpack-perl.git
+  mem: 128M
+  services:
+    ${name}-db:
+      type: mysql
+  stackato:
+    env:
+      PERL_CPANM_OPT: --notest
+    hooks:
+      post-staging: perl setup.pl
+    # Prevent a local development copy of the bugzilla tarball or directory
+    # from being synced to the cloud controller.
+    ignores:
+    - bugzilla
+    min_version:
+      client: 1.4.3
