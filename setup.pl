@@ -7,7 +7,7 @@ use JSON qw(decode_json);
 use version;
 
 # Fetch Bugzilla source code
-my $LATEST = "http://ftp.mozilla.org/pub/mozilla.org/webtools/bugzilla-4.0.2.tar.gz";
+my $LATEST = "http://ftp.mozilla.org/pub/mozilla.org/webtools/archived/bugzilla-4.0.2.tar.gz";
 my $tarball = "bugzilla.tar.gz";
 
 unlink($tarball);
@@ -29,7 +29,7 @@ print "cd $bugzilla_dir\n";
 chdir($bugzilla_dir);
 
 # Apply fix for https://bugzilla.mozilla.org/show_bug.cgi?id=678772
-my $PATCH = "http://bzr.mozilla.org/bugzilla/4.0/diff/7644";
+my $PATCH = "https://bug678772.bmoattachments.org/attachment.cgi?id=552915";
 my $diff_file = "7644.diff";
 mirror($PATCH, $diff_file);
 die unless -f $diff_file;
