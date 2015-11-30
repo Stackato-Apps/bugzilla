@@ -2,7 +2,7 @@
 use warnings;
 use JSON qw(decode_json);
 
-# get deployed app info from Stackato
+# get deployed app info from HPE Helion Stackato
 my $appinfo;
 my $stackatoURL;
 if (defined $ENV{VCAP_APPLICATION}){
